@@ -1,0 +1,376 @@
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(qiimer)
+library(vegan)
+library(ape)
+library(usedist)
+
+## Visualization packages
+library(pander)
+library(kableExtra)
+
+library(pheatbuilder)
+library(ggbeeswarm)
+library(ggsci)
+library(viridis)
+library(wesanderson)
+library(RColorBrewer)
+
+# stats packages
+library(adonisplus)
+library(nlme)
+library(emmeans) # for lmer post-hoc tests
+library(broom.mixed)
+```
+
+```{r}
+se <- function(x) sd(x)/sqrt(length(x))
+
+logit <- function(x) { log(x / (1-x)) }
+
+p_stars <- function (pvals) {
+  cut(pvals, breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), labels = c("***", "**", "*", "+", ""))
+}
+
+tidy_lm_posthoc <- function(lmer_test, term_string) {
+  form1 <- as.formula(paste("pairwise ~", term_string))
+  mod <- anova(lmer_test)
+  
+  if(class(lmer_test) == "lm") {
+    main_tidy <- tidy(mod)
+  } else {
+    main_tidy <- data.frame(term = rownames(mod), mod, row.names=NULL) %>% 
+      rename(df=numDF)
+  }
+  
+  bind_rows(main_tidy,
+            data.frame(emmeans(lmer_test, form1, adjust="tukey")$contrasts) %>% rename(term = contrast, std.error=SE)
+            ) %>%
+    mutate(estimate = estimate * -1) %>%
+    select(term, df, estimate, std.error,  p.value) ## can also add statistic and t.ratio columns if needed
+}
+
+theme_clean <- function(){ 
+    theme_bw() %+replace%    #replace elements we want to change
+    theme(
+      panel.grid = element_blank(), 
+      strip.background = element_blank()
+    )
+}
+
+theme_clean_pcoa <- function(){ 
+    theme_bw() %+replace%    #replace elements we want to change
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    )
+}
+
+kable_style <- function(data, col_name=p.value, threshold=0.05) {
+  
+  row_num <- nrow(data)
+  
+  ##substitute underscore with escaped underscores and remove na in p.value columns
+  data_return <- data %>%
+    select_all(~gsub("_", "\\\\_", .)) %>% ##need to escape the escape
+    select_all(~gsub("#", "\\\\#", .)) %>% ##need to escape the escape
+    mutate_if(function(x) is.character(x) | is.factor(x), ~gsub("_", " ", .)) %>%
+    mutate_if(function(x) is.character(x) | is.factor(x), ~gsub("%", "\\\\%", .))
+  
+  ## highlight significant values
+  col_name <- enquo(col_name)
+  data_return <- data_return %>%
+    mutate(!!col_name := cell_spec(signif(!!col_name, 2), "latex", bold = !!col_name<threshold))
+  
+  ##if Taxa is a column in the dataframe
+  if(sum(grepl("Taxa", colnames(data_return))) > 0)  {
+    data_return <- data_return %>%
+      mutate(Taxa = gsub("[pcofgs]__", "", Taxa))
+  }
+  
+  # ... should be column number
+  if (row_num > 15) {
+    data_return <- data_return %>%
+      kable("latex", longtable = T, digits=2, booktabs=T, escape=F) %>%
+      kable_styling(latex_options = c("repeat_header", "HOLD_position"), font_size = 7) %>%
+      row_spec(0, bold = T, color="#7C0A02") #%>%
+      #collapse_rows(columns = 1, valign = "top") 
+    
+  }
+  else {
+    data_return <- data_return %>%
+      kable("latex", longtable = F, digits=2, booktabs=T, escape=F) %>%
+      kable_styling(latex_options = c("scale_down", "repeat_header", "HOLD_position")) %>%
+      row_spec(0, bold = T, color="#7C0A02")
+    
+    if(row_num > 1) { ##always collapse row unless there is only 1 row
+      data_return <- data_return %>%
+        collapse_rows(columns = 1, valign = "top")
+    }
+  }
+  
+  return(data_return)
+  
+}
+
+```
+
+
+```{r}
+### =====================
+###   define constants
+### =====================
+
+## Path to the data folder
+data_dir <- "Data/16S"
+
+### minimum QC read count threshold
+min_reads <- 1000
+
+### rarefying subsample size 
+richness_subsample_size <- 1000
+
+## The number of permutations to do for PERMANOVA. You can start with 99 permutations to run faster while developing the code, then change it to 999 permutations for higher resolution.
+perm <- 99 
+
+### mapping file path
+mapping_file_fp <- file.path(data_dir, "20230404_Abdel_Mohsen_run2_16S_mapping_file_KY3MT.tsv")
+
+### demux counts file path
+demux_count_fp <- file.path(data_dir, "total_read_counts.tsv")
+
+### otu table file path
+feature_table_fp <- file.path(data_dir, "QIIME_output", "denoise-results", "feature_table", "feature-table.tsv")
+
+### taxonomic assignment file path
+taxo_assignment_fp <- file.path(data_dir, "QIIME_output", "denoise-results", "taxonomy", "taxonomy.tsv")
+
+### unweighted UniFrac file path
+uu_fp <- file.path(data_dir, "QIIME_output", "denoise-results", "core-metrics-unrarefied", "uu_unrarefied.tsv")
+
+### weighted UniFrac file path
+wu_fp <- file.path(data_dir, "QIIME_output", "denoise-results", "core-metrics-unrarefied", "wu_unrarefied.tsv")
+
+### Faith phylogenetic diversity
+faith_fp <- file.path(data_dir, "QIIME_output", "denoise-results", "core-metrics-unrarefied", "faith_pd_unrarefied.tsv")
+```
+
+
+```{r}
+### read mapping file
+
+### If you need to change the metadata / add columns do it here so it's consistent across analysis files!
+### Relevel factors here!
+s <- read_qiime_mapping_file(mapping_file_fp) %>%
+  mutate(isControl = grepl("emptywell|extractblank|dnafree|geneblock|mockdna", SampleID, ignore.case = T)) %>%
+  rename(sample_type = SampleType) %>%
+  left_join(read_delim(file.path(data_dir, "../R01_Data_v24_Phase_1_merged_sexual_orientation_only.txt")), by="subject_id")
+```
+
+
+```{r, warning = F}
+### read otu count data
+counts <- read_tsv(file = feature_table_fp, skip = 1) %>%
+  column_to_rownames(var = "#OTU ID") %>%
+  as.matrix()
+
+### taxonomy assignment
+ta <- read_tsv(file = taxo_assignment_fp) %>%
+  mutate(Taxon = str_replace(Taxon, "D_0","k")) %>% 
+  mutate(Taxon = str_replace(Taxon, "D_1","p")) %>% 
+  mutate(Taxon = str_replace(Taxon, "D_2","c")) %>% 
+  mutate(Taxon = str_replace(Taxon, "D_3","o")) %>% 
+  mutate(Taxon = str_replace(Taxon, "D_4","f")) %>% 
+  mutate(Taxon = str_replace(Taxon, "D_5","g")) %>% 
+  mutate(Taxon = str_replace(Taxon, "D_6","s")) %>% 
+  mutate(Taxon = str_remove(Taxon, "(;[kpcofgs]__)+$")) %>%
+  arrange(order(match(rownames(counts), `Feature ID`))) # make sure that OTU table and taxonomy assignment have the same rownames
+
+### taxonomy assignment as a data frame
+adf <- split_assignments(ta$Taxon, split = ";")
+rownames(adf) <- ta$`Feature ID`
+
+rm(ta)
+```
+
+```{r}
+### get read counts after demultiplexing
+demux <- read_tsv(file = demux_count_fp) %>%
+  setNames(c("SampleID", "demux_Read_Counts"))
+
+percent_unassigned <- demux %>%
+  mutate(isUnassigned = ifelse(SampleID == "unassigned", "Unassigned", "Samples")) %>%
+  group_by(isUnassigned) %>%
+  summarize(numReads = sum(demux_Read_Counts)) %>%
+  ungroup() %>%
+  mutate(total_reads = sum(numReads)) %>%
+  mutate(perc_reads = numReads / total_reads) %>%
+  filter(isUnassigned == "Samples")
+
+### get read counts after denosing by DADA2 in QIIME2 pipeline
+denoise <- colSums(counts) %>%
+  enframe("SampleID", "denoise_Read_Counts")
+  
+### get read counts after removing contamination
+is_mitochondrial <- grepl("mitochondria", adf$Family)
+is_chloroplast <- grepl("Chloroplast", adf$Class)
+is_unassigned <- grepl("Unassigned", adf$Kingdom)
+#is_archaea <- grepl("Archaea", adf$Kingdom)
+is_contam <- is_mitochondrial | is_chloroplast | is_unassigned 
+
+counts <- counts[!is_contam, ]
+adf <- adf[!is_contam, ]
+
+qc <- colSums(counts) %>%
+  enframe("SampleID", "QC_Read_Counts") 
+
+s <- s %>%
+  left_join(demux, by = "SampleID") %>%
+  left_join(denoise, by = "SampleID") %>%
+  left_join(qc, by = "SampleID") %>%
+  mutate(above_min_reads = QC_Read_Counts > min_reads) %>%
+  mutate(QC_read_call = factor(ifelse(above_min_reads, "above threshold", "below threshold"))) %>%
+  mutate(Keep = !is.na(QC_Read_Counts) & QC_Read_Counts > min_reads)
+
+rm(is_mitochondrial, is_chloroplast, is_unassigned)
+rm(demux, denoise, qc)
+```
+
+
+```{r}
+a <- simplify_assignments(adf, rank1="Phylum", rank2="Genus")
+names(a) <- rownames(adf)
+summed_cts <- rowsum(counts, a) 
+summed_props <- sweep(summed_cts, 2, colSums(summed_cts), "/")
+
+otu_props <- sweep(counts, 2, colSums(counts), "/")
+
+a_f <- simplify_assignments(adf, rank1="Phylum", rank2="Family")
+names(a_f) <- rownames(adf)
+summed_cts_f <- rowsum(counts, a_f) 
+summed_props_f <- sweep(summed_cts_f, 2, colSums(summed_cts_f), "/")
+
+a_p <- simplify_assignments(adf, rank1="Kingdom", rank2="Phylum")
+names(a_p) <- rownames(adf)
+summed_cts_p <- rowsum(counts, a_p) 
+summed_props_p <- sweep(summed_cts_p, 2, colSums(summed_cts_p), "/")
+```
+
+```{r eval=F}
+adf %>%
+  merge(otu_props, by="row.names") %>%
+  write.table(file="abdel_mohsen_run2_SNV_props.tsv", sep='\t', row.names=F, quote=F)
+
+write.table(summed_props, file="abdel_mohsen_run2_taxon_props.tsv", sep='\t', quote=F)
+```
+
+
+
+```{r eval=F}
+temp <- t(summed_props_p["k__Bacteria p__Bacteroidetes",,drop=F]) %>% as.data.frame() %>% rownames_to_column() %>% setNames(c("SampleID", "props_16S")) %>%
+  left_join(select(s, SampleID, subject_id, sample_type, study_group), by="SampleID") %>%
+  left_join(select(temp2, -SampleID), by=c("subject_id", "sample_type")) %>%
+  select(SampleID, sample_type, study_group, subject_id, everything()) %>%
+  arrange(sample_type, study_group)
+write.table(temp, "abdel_mohsen_run2_Bacteroidetes_props.csv", quote=F, row.names=F, sep=',')
+```
+
+
+```{r alpha diversity}
+
+richness <- rarefy(t(counts), richness_subsample_size) %>%
+  enframe("SampleID", "Richness")
+shannon <- diversity(t(counts)) %>%
+  enframe("SampleID", "Shannon")
+faith <- read_tsv(file = faith_fp) %>%
+  setNames(c("SampleID", "Faith"))
+
+### add alpha diversity measures
+s <- s %>%
+  left_join(richness, by = "SampleID") %>%
+  left_join(shannon, by = "SampleID") %>%
+  left_join(faith, by = "SampleID")
+
+rm(richness, shannon, faith)
+```  
+
+```{r beta diversity}
+wu <- read_qiime_distmat(wu_fp)
+uu <- read_qiime_distmat(uu_fp)
+```
+
+
+```{r}
+# read in marker data
+
+## Some notes:
+## 1) If anything is above limit of detection annotated as "above standard" or "higher"
+## the 1.1 times the maximum value is imputed
+##
+## 2) If anything is below limit of detection annotated as "lower", they are replaced with 0s at first.
+
+## All the NA values (including the ones that were NA to begin with) are left as they are.
+## All the 0s are imputed with the 0.1*lowest value
+column_groups <- read_delim(file.path(data_dir, "../Data_Phase_1_V22_062123_columns.txt"))
+
+markers <- readxl::read_excel(file.path(data_dir, "../R01_Data_v24_Phase_1_merged.xlsx"), skip = 1) %>%
+  select(-one_of("Collection Date", "Group code", "Group")) %>%
+  
+  mutate(`Occludin (ng/ml)` = ifelse(`Occludin (ng/ml)`=="above standard", as.character(33.485765075378602*1.1), `Occludin (ng/ml)`)) %>%
+  mutate(`Occludin (ng/ml)` = as.numeric(`Occludin (ng/ml)`)) %>%
+  
+  mutate(`C3a (ng/ml)` = ifelse(`C3a (ng/ml)`=="lower", "0", `C3a (ng/ml)`)) %>%
+  mutate(`C3a (ng/ml)` = as.numeric(`C3a (ng/ml)`)) %>%
+  
+  mutate(`Gal-1 (ng/ml)` = ifelse(`Gal-1 (ng/ml)`=="HIGHER", as.character(169.6835132917455*1.1), `Gal-1 (ng/ml)`)) %>%
+  mutate(`Gal-1 (ng/ml)` = as.numeric(`Gal-1 (ng/ml)`)) %>%
+  
+  mutate(`Gal-3 (pg/ml)` = ifelse(`Gal-3 (pg/ml)`=="HIGHER", as.character(27576.951*1.1), `Gal-3 (pg/ml)`)) %>%
+  mutate(`Gal-3 (pg/ml)` = as.numeric(`Gal-3 (pg/ml)`))
+
+markers_long <- markers %>%
+  select(-one_of(column_groups %>% filter(Platform == "Demographics") %>% pull(Marker))) %>%
+  pivot_longer(-`Study Code`, names_to="Marker", values_to="Value") %>%
+  left_join(column_groups, by="Marker") 
+
+markers_mins <- markers_long %>%
+  filter(Value != 0) %>%
+  filter(!is.na(Value)) %>%
+  mutate(Value = abs(Value)) %>%
+  
+  group_by(Platform, Marker) %>%
+  summarise(min_value = min(Value) / 10) %>%
+  ungroup()
+
+markers_long <- markers_long %>%
+  left_join(markers_mins, by=c("Platform", "Marker")) %>%
+  mutate(Value = ifelse(Value==0, min_value, Value)) %>%
+  ungroup() %>%
+  select(-min_value) %>%
+  rename(subject_id=`Study Code`)
+
+
+
+```
+
+
+```{r}
+s %>%
+  filter(!isControl) %>%
+  select(SampleID, sample_type, subject_id, study_group, sex, Race, Ethnicity, Age, final_library_conc_ng_ul, Keep) %>%
+  write.table("../../HIV_GutAging_paper/metadata_for_SRA.txt", quote=F, row.names=F, sep='\t')
+
+
+s %>%
+  filter(!isControl) %>%
+  select(SampleID) %>%
+  mutate(R1 = paste0(SampleID, "_R1.fastq.gz")) %>%
+  mutate(R2 = paste0(SampleID, "_R2.fastq.gz")) %>%
+  write.table("../../HIV_GutAging_paper/files_for_SRA.txt", quote=F, row.names=F, sep='\t')
+```
+

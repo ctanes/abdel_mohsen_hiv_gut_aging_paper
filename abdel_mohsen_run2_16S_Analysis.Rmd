@@ -1,0 +1,2250 @@
+---
+title: |
+  ![](logo_blk.png){width=5in}  
+  Abdel-Mohsen run2
+author: "Ceylan Tanes"
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r knitr setup, echo=FALSE}
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=6,
+  fig.height=4,
+  fig.align = "center"
+  )
+```
+
+
+```{r child = 'abdel_mohsen_run2_16S_preamble.Rmd'}
+```
+
+
+
+# HIV- and HIV+ comparison
+
+```{r}
+## Subset the metadata file to only keep the samples you would like to test on
+s_toTest <- s %>%
+  filter(Keep) %>%
+  filter(!isControl) %>%
+  mutate(sample_type = factor(sample_type, levels=c("Ileum Tissue", "Colon Tissue", "Feces"))) %>%
+  droplevels()
+
+## Set colors for each factor ahead of time so they are consistent through the report.
+ann_colors = list(
+  #sample_type = factor_palette(s_toTest$sample_type, brewer.pal(12, "Paired")),
+  study_group = factor_palette(s_toTest$study_group, as.character(wes_palette("Cavalcanti1"))),
+  sample_type = factor_palette(s_toTest$sample_type, viridis(length(unique(s_toTest$sample_type)), end=0.8) )
+)
+
+## Change this to be the breakdown of whatever variable the collaborator is interested in
+addmargins(table(s_toTest$sample_type, s_toTest$study_group, useNA = "ifany")) %>%
+  pander(split.table=Inf)
+```
+
+\newpage
+
+The figure below illustrates the sample types collected for each subject and included in the analysis.
+
+```{r fig.height=8, fig.width=2}
+s_toTest %>%
+  mutate(temp = 1) %>%
+  ggplot(aes(x=sample_type, y=subject_id, fill=temp)) +
+    geom_tile() +
+    facet_grid(study_group~., space="free", scales="free") +
+    theme_clean() +
+    theme(
+      axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)
+    ) +
+    guides(fill="none") +
+    #coord_equal() +
+    labs(
+      x="",
+      y="Subjects"
+    )
+
+```
+
+\newpage
+
+## Heatmap
+
+```{r}
+prop_cut <- 0.005
+```
+
+Heatmap charts were generated from the taxonomic assignments. Each column represents one sample and each row represents one taxon (typically a genus or family). Ranks are included in the plot if the taxon is present in `r 100*prop_cut`% mean abundance in at least one sample type.
+
+The chart is colored white if species were not observed in the sample, dark blue if species were observed at very low abundance.  This allows the reader to quickly survey species presence/absence.  Abundance values exceeding 40% are colored red, indicating an extremely dominant species.
+
+
+```{r fig.width=50, fig.height=10}
+s_toPlot <- s_toTest %>%
+  select(SampleID, sample_type, study_group, sexual_orientation) %>%
+  arrange(study_group, sample_type) %>%
+  droplevels()
+
+# select taxa with mean relative abundance of 1% in at least one sample type
+select_taxa <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toPlot, by="SampleID")  %>%
+  group_by(sample_type, Taxa) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  mutate(mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  filter(mean_prop > prop_cut) %>%
+  pull(Taxa) %>%
+  as.character() %>%
+  unique()
+
+props_toPlot <- summed_props[select_taxa, s_toPlot$SampleID]
+
+props_toPlot %>%
+  pheat() %>%
+  pheat_color_saturated() %>%
+  pheat_cluster_rows() %>%
+  pheat_annotate_cols(s_toPlot) %>%
+  pheat_display_cols(gaps = factor_gaps(s_toPlot$sample_type))  %>%
+  pheat_annotation_color(
+    sample_type = ann_colors$sample_type,
+    study_group = ann_colors$study_group
+  )
+
+```
+
+\newpage
+
+## Differential abundance
+
+Only the taxa with >1% mean relative abundance across all samples are tested.
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>%
+  group_by(Taxa, sample_type) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  mutate(max_mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  
+  filter(max_mean_prop > 0.01) %>%
+  filter(Taxa != "Bacteria") %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+```{r fig.height=15, fig.width=12}
+props_toTest %>%
+  
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, -props)) %>%
+  
+  ggplot(aes(x=study_group, y=props, color=sample_type)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    facet_wrap(~Taxa, scales="free", ncol=4) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    theme_clean() +
+    theme(
+      legend.position = "bottom"
+    ) +
+    #guides(color="none") +
+    labs(
+      x="", color="",
+      y="Relative abundance")
+```
+
+
+
+Linear models were used to estimate the change in relative abundance of select taxa between study groups. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+For each sample type: props_log ~ study_group
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, sample_type) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) # %>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=8}
+summaries_df %>%
+  
+  filter(!grepl("uncultured", Taxa)) %>%
+  mutate(Taxa = sub("p__.* [cofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(p.value<0.05, "p<0.05", "p>0.05")) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", isSig)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", isSig)) %>%
+  mutate(isSig = factor(isSig, levels=c("p>0.05", "p<0.05", "q<0.1", "q<0.05"))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=sample_type, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    scale_shape_manual(values=c(1,17,15,16)) +
+    #facet_wrap(~study_day) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nHIV- and HIV+",
+      y="", color="", shape=""
+    )
+
+ggsave("abdel_mohsen_16S_diff_ab.pdf", height=8, width=7, useDingbats=F)
+```
+
+
+For each HIV status: props_log ~ sample_type, random=~1|subject_id
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, study_group) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  do(tidy_lm_posthoc(nlme::lme(props_log ~ sample_type, random=~1|subject_id, data=., na.action=na.omit), "sample_type")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(1), width = "16em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=8}
+summaries_df %>%
+  filter(term != "sample_type") %>%
+  
+  filter(!grepl("uncultured", Taxa)) %>%
+  mutate(Taxa = sub("p__.* [cofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(p.value<0.05, "p<0.05", "p>0.05")) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", isSig)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", isSig)) %>%
+  mutate(isSig = factor(isSig, levels=c("p>0.05", "p<0.05", "q<0.1", "q<0.05"))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    scale_color_brewer(palette="Dark2") +
+    scale_shape_manual(values=c(1, 17,15,16)) +
+    facet_wrap(~study_group) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nsample types",
+      y="", color="", shape=""
+    )
+ggsave("abdel_mohsen_16S_diff_ab_sample_type.pdf", height=8, width=8, useDingbats=F)
+```
+
+
+
+For all samples: props_log ~ sample_type, random=~1|subject_id
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  do(tidy_lm_posthoc(nlme::lme(props_log ~ sample_type, random=~1|subject_id, data=., na.action=na.omit), "sample_type")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) # %>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=6}
+summaries_df %>%
+  filter(term != "sample_type") %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~study_group) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nsample types",
+      y="", color="", shape=""
+    )
+```
+
+
+\newpage
+
+## Differential abundance:SNV level
+
+Only the SNVs with >1% mean relative abundance across all samples are tested.
+
+```{r}
+props_toTest <- otu_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("SNV") %>% 
+  pivot_longer(-SNV, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>%
+  
+  group_by(SNV, sample_type) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  group_by(SNV) %>%
+  mutate(max_mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  
+  filter(max_mean_prop > 0.01) %>%
+  droplevels() %>%
+  
+  merge(a, by.x="SNV", by.y="row.names", all.x=T) %>%
+  rename(Name = y) %>%
+  mutate(Name = gsub("[pcofgs]__", "", Name)) %>%
+  
+  mutate(SNV = str_sub(SNV, 1, 10)) %>% ### if the SNV names don't fit in the plot, you can shorten them for plotting
+  mutate(Taxa = paste(Name, SNV, sep = ' ')) %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+
+```
+
+
+```{r fig.height=15, fig.width=12}
+props_toTest %>%
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x=study_group, y=props, color=sample_type)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    facet_wrap(~Taxa, scales="free", ncol=3) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    theme_clean() +
+    theme(
+      legend.position = "bottom"
+    ) +
+    #guides(color="none") +
+    labs(y="Relative abundance")
+```
+
+
+Linear models were used to estimate the change in relative abundance of select SNVs between study groups. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+
+For each sample type: props_log ~ study_group
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, sample_type) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  kable_style(fdr, 0.1) # %>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=6}
+summaries_df %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=sample_type, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~study_day) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nHIV- and HIV+",
+      y="", color="", shape=""
+    )
+```
+
+
+For each HIV status: props_log ~ sample_type, random=~1|subject_id
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, study_group) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  do(tidy_lm_posthoc(nlme::lme(props_log ~ sample_type, random=~1|subject_id, data=., na.action=na.omit), "sample_type")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) %>%
+  column_spec(c(1), width = "16em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=6}
+summaries_df %>%
+  filter(term != "sample_type") %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~study_group) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nsample types",
+      y="", color="", shape=""
+    )
+```
+
+
+
+For all samples: props_log ~ sample_type, random=~1|subject_id
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  do(tidy_lm_posthoc(nlme::lme(props_log ~ sample_type, random=~1|subject_id, data=., na.action=na.omit), "sample_type")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) # %>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=6}
+summaries_df %>%
+  filter(term != "sample_type") %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~study_group) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nsample types",
+      y="", color="", shape=""
+    )
+```
+
+## Beta diversity
+
+Here, we use weighted and unweighted UniFrac distances to compare the species composition of the samples to each other.
+
+The plots below show the distance between each pair of samples in a single 2D plot.  It is not possible to plot the distances exactly on paper, so we have used a method of ordination called Principal Coordinates Analysis to select the best coordinate system for display.  The percentage of total variance captured along each axis is displayed on the chart.
+
+```{r}
+s_toTest %>%
+  pcoaplus(wu) %>%
+  plot(color=study_group) +
+    scale_color_manual(values=ann_colors$study_group) +
+    facet_wrap(~sample_type) +
+    theme_clean_pcoa() +
+    labs(color="", title="Weighted UniFrac")
+```
+
+
+```{r}
+pc_df <- s_toTest %>%
+  pcoaplus(wu) 
+
+centroids <- pc_df %>%
+  group_by(sample_type, study_group) %>%
+  summarize(Axis.1 = mean(Axis.1), Axis.2 = mean(Axis.2)) %>%
+  ungroup()
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group)) +
+    geom_point(alpha=0.5) +
+    geom_point(data=centroids, shape=8, stroke=2) +
+    scale_color_manual(values=ann_colors$study_group) +
+    facet_wrap(~sample_type) +
+    theme_clean_pcoa() +
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="")
+
+ggsave("abdel_mohsen_16S_unifrac_pcoa.pdf", height=3, width=6, useDingbats=F)
+```
+
+
+
+```{r}
+pc_df <- s_toTest %>%
+  pcoaplus(wu) 
+
+centroids <- pc_df %>%
+  group_by(sample_type, study_group) %>%
+  summarize(Axis.1 = mean(Axis.1), Axis.2 = mean(Axis.2)) %>%
+  ungroup()
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=sample_type)) +
+    geom_point(alpha=0.5) +
+    geom_point(data=centroids, shape=8, stroke=2) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    facet_wrap(~study_group) +
+    theme_clean_pcoa() +
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="")
+
+ggsave("abdel_mohsen_16S_unifrac_pcoa_sampletype.pdf", height=3, width=6, useDingbats=F)
+```
+
+
+
+```{r}
+s_toTest %>%
+  pcoaplus(uu) %>%
+  plot(color=study_group) +
+    scale_color_manual(values=ann_colors$study_group) +
+    facet_wrap(~sample_type) +
+    theme_clean_pcoa() +
+    labs(color="", title="Unweighted UniFrac")
+```
+
+
+
+PERMANOVA test on weighted and unweighted UniFrac distances to test if the centroids of the study groups can be distinguished from each other.
+
+For each sample type: distmat ~ study_group
+
+```{r}
+summaries_df <- rbind(
+  s_toTest %>%
+    group_by(sample_type) %>%
+    do(adonisplus(
+      ., distmat = wu, formula = distmat ~ study_group,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup() %>%
+    mutate(metric = "Weighted UniFrac"),
+  
+  s_toTest %>%
+    group_by(sample_type) %>%
+    do(adonisplus(
+      ., distmat = uu, formula = distmat ~ study_group,
+      sample_id_var = SampleID, permutations=999)) %>%
+    ungroup() %>%
+    mutate(metric = "Unweighted UniFrac")
+) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq"))) %>%
+  select(metric, everything())
+
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+For each study group: distmat ~ sample_type
+
+```{r}
+summaries_df <- rbind(
+  s_toTest %>%
+    group_by(study_group) %>%
+    do(adonispost(
+      ., distmat = wu, formula = distmat ~ sample_type,
+      sample_id_var = SampleID, rep_meas_var = subject_id,
+      shuffle = c(sample_type = "within"), permutations=999, which = sample_type, alpha=1)) %>%
+    ungroup() %>%
+    mutate(metric = "Weighted UniFrac"),
+  
+  s_toTest %>%
+    group_by(study_group) %>%
+    do(adonispost(
+      ., distmat = uu, formula = distmat ~ sample_type,
+      sample_id_var = SampleID, rep_meas_var = subject_id,
+      shuffle = c(sample_type = "within"), permutations=999, which = sample_type, alpha=1)) %>%
+    ungroup() %>%
+    mutate(metric = "Unweighted UniFrac")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "meansq", "term"))) %>%
+  select(metric, everything())
+
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  kable_style()
+```
+
+
+For all samples: distmat ~ sample_type
+
+```{r}
+summaries_df <- rbind(
+  s_toTest %>%
+    #group_by(study_group) %>%
+    do(adonispost(
+      ., distmat = wu, formula = distmat ~ sample_type,
+      sample_id_var = SampleID, rep_meas_var = subject_id,
+      shuffle = c(sample_type = "within"), permutations=perm, which = sample_type, alpha=1)) %>%
+    #ungroup() %>%
+    mutate(metric = "Weighted UniFrac"),
+  
+  s_toTest %>%
+    #group_by(study_group) %>%
+    do(adonispost(
+      ., distmat = uu, formula = distmat ~ sample_type,
+      sample_id_var = SampleID, rep_meas_var = subject_id,
+      shuffle = c(sample_type = "within"), permutations=perm, which = sample_type, alpha=1)) %>%
+    #ungroup() %>%
+    mutate(metric = "Unweighted UniFrac")
+) %>%
+  filter(!term %in% c("Residuals", "Total")) %>%
+  select(-one_of(c("sumsq", "term"))) %>%
+  select(metric, everything())
+
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  kable_style()
+```
+
+
+## Alpha diversity
+
+Alpha diversity was assessed by the expected number of observed OTUs (out of rarefying sample size of `r format(richness_subsample_size, big.mark = ",", scientific = F)`), Shannon index, and Faith’s phylogenetic diversity.
+
+```{r fig.width=8}
+s_toTest %>%
+  pivot_longer(c("Richness", "Shannon", "Faith"), names_to="metric", values_to="alpha") %>%
+  mutate(metric = fct_relevel(metric, "Faith", after=Inf)) %>%
+  mutate(metric = fct_recode(metric, `Faith's PD`="Faith")) %>%
+  
+  ggplot(aes(x=study_group, y=alpha, color=sample_type)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_grid(metric~., scales = "free") +
+    scale_color_manual(values=ann_colors$sample_type) +
+    theme_clean() +
+    #guides(color="none") +
+    labs(
+      x="", color="",
+      y="Alpha diversity value"
+    )
+
+```
+
+```{r}
+s_toTest %>%
+  select(SampleID, study_group, sample_type, Richness, Shannon, Faith) %>%
+  write.table("abdel_mohsen_16S_alpha.txt", row.names=F, quote=F, sep='\t')
+```
+
+
+
+Linear models were used to estimate the difference between study groups.
+
+
+For each sample type: props_log ~ study_group
+
+```{r}
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon", "Faith"), names_to="metric", values_to="alpha") %>%
+  mutate(metric = fct_relevel(metric, "Faith", after=Inf)) %>%
+  mutate(metric = fct_recode(metric, `Faith's PD`="Faith")) %>%
+  
+  group_by(metric, sample_type) %>%
+  
+  # for regular linear models
+  do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) ### You only need this when you are not using the tidy_lm_posthoc
+
+
+summaries_df %>%
+  kable_style()
+
+```
+
+
+For each study group: alpha ~ sample_type, random=~1|subject_id
+
+```{r}
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon", "Faith"), names_to="metric", values_to="alpha") %>%
+  mutate(metric = fct_relevel(metric, "Faith", after=Inf)) %>%
+  mutate(metric = fct_recode(metric, `Faith's PD`="Faith")) %>%
+  
+  group_by(metric, study_group) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  do(tidy_lm_posthoc(nlme::lme(alpha ~ sample_type, random=~1|subject_id, data=., na.action=na.omit), "sample_type")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) ### You only need this when you are not using the tidy_lm_posthoc
+
+
+summaries_df %>%
+  kable_style()
+
+```
+
+
+
+For all samples: alpha ~ sample_type, random=~1|subject_id
+
+```{r}
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon", "Faith"), names_to="metric", values_to="alpha") %>%
+  mutate(metric = fct_relevel(metric, "Faith", after=Inf)) %>%
+  mutate(metric = fct_recode(metric, `Faith's PD`="Faith")) %>%
+  
+  group_by(metric) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  do(tidy_lm_posthoc(nlme::lme(alpha ~ sample_type, random=~1|subject_id, data=., na.action=na.omit), "sample_type")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) ### You only need this when you are not using the tidy_lm_posthoc
+
+
+summaries_df %>%
+  kable_style()
+
+```
+
+
+
+# HIV- and HIV+ comparison for heterosexual subjects only
+
+
+```{r}
+## Subset the metadata file to only keep the samples you would like to test on
+s_toTest <- s %>%
+  filter(Keep) %>%
+  filter(!isControl) %>%
+  mutate(sample_type = factor(sample_type, levels=c("Ileum Tissue", "Colon Tissue", "Feces"))) %>%
+  filter(sexual_orientation == "Heterosexual") %>%
+  droplevels()
+
+## Set colors for each factor ahead of time so they are consistent through the report.
+ann_colors = list(
+  #sample_type = factor_palette(s_toTest$sample_type, brewer.pal(12, "Paired")),
+  study_group = factor_palette(s_toTest$study_group, as.character(wes_palette("Cavalcanti1"))),
+  sample_type = factor_palette(s_toTest$sample_type, viridis(length(unique(s_toTest$sample_type)), end=0.8) )
+)
+
+## Change this to be the breakdown of whatever variable the collaborator is interested in
+addmargins(table(s_toTest$sample_type, s_toTest$study_group, useNA = "ifany")) %>%
+  pander(split.table=Inf)
+```
+
+
+## Heatmap
+
+```{r}
+prop_cut <- 0.005
+```
+
+Heatmap charts were generated from the taxonomic assignments. Each column represents one sample and each row represents one taxon (typically a genus or family). Ranks are included in the plot if the taxon is present in `r 100*prop_cut`% mean abundance in at least one sample type.
+
+The chart is colored white if species were not observed in the sample, dark blue if species were observed at very low abundance.  This allows the reader to quickly survey species presence/absence.  Abundance values exceeding 40% are colored red, indicating an extremely dominant species.
+
+
+```{r fig.width=50, fig.height=10}
+s_toPlot <- s_toTest %>%
+  select(SampleID, sample_type, study_group, sexual_orientation) %>%
+  arrange(study_group, sample_type) %>%
+  droplevels()
+
+# select taxa with mean relative abundance of 1% in at least one sample type
+select_taxa <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toPlot, by="SampleID")  %>%
+  group_by(sample_type, Taxa) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  mutate(mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  filter(mean_prop > prop_cut) %>%
+  pull(Taxa) %>%
+  as.character() %>%
+  unique()
+
+props_toPlot <- summed_props[select_taxa, s_toPlot$SampleID]
+
+props_toPlot %>%
+  pheat() %>%
+  pheat_color_saturated() %>%
+  pheat_cluster_rows() %>%
+  pheat_annotate_cols(s_toPlot) %>%
+  pheat_display_cols(gaps = factor_gaps(s_toPlot$sample_type))  %>%
+  pheat_annotation_color(
+    sample_type = ann_colors$sample_type,
+    study_group = ann_colors$study_group
+  )
+
+```
+
+
+## Differential abundance
+
+Only the taxa with >1% mean relative abundance across all samples are tested.
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>%
+  group_by(Taxa, sample_type) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  mutate(max_mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  
+  filter(max_mean_prop > 0.01) %>%
+  filter(Taxa != "Bacteria") %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+```{r fig.height=15, fig.width=12}
+props_toTest %>%
+  
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, -props)) %>%
+  
+  ggplot(aes(x=study_group, y=props, color=sample_type)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    facet_wrap(~Taxa, scales="free", ncol=4) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    theme_clean() +
+    theme(
+      legend.position = "bottom"
+    ) +
+    #guides(color="none") +
+    labs(
+      x="", color="",
+      y="Relative abundance")
+```
+
+
+Linear models were used to estimate the change in relative abundance of select taxa between study groups. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+For each sample type: props_log ~ study_group
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, sample_type) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) # %>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=8}
+summaries_df %>%
+  
+  filter(!grepl("uncultured", Taxa)) %>%
+  mutate(Taxa = sub("p__.* [cofgs]__", "", Taxa)) %>%
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(p.value<0.05, "p<0.05", "p>0.05")) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", isSig)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", isSig)) %>%
+  mutate(isSig = factor(isSig, levels=c("p>0.05", "p<0.05", "q<0.1", "q<0.05"))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=sample_type, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$sample_type) +
+    scale_shape_manual(values=c(1,17,15,16)) +
+    #facet_wrap(~study_day) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nHIV- and HIV+",
+      y="", color="", shape=""
+    )
+
+ggsave("abdel_mohsen_16S_diff_ab_heterosexualOnly.pdf", height=8, width=7, useDingbats=F)
+```
+
+For all samples: props_log ~ sample_type, random=~1|subject_id
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  do(tidy_lm_posthoc(nlme::lme(props_log ~ sample_type, random=~1|subject_id, data=., na.action=na.omit), "sample_type")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) # %>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=8, fig.height=6}
+summaries_df %>%
+  filter(term != "sample_type") %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~study_group) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between\nsample types",
+      y="", color="", shape=""
+    )
+ggsave("abdel_mohsen_16S_diff_ab_sampleType_heterosexualOnly.pdf", height=5, width=8, useDingbats=F)
+```
+
+
+## Alpha diversity
+
+```{r fig.width=8}
+s_toTest %>%
+  pivot_longer(c("Richness", "Shannon", "Faith"), names_to="metric", values_to="alpha") %>%
+  mutate(metric = fct_relevel(metric, "Faith", after=Inf)) %>%
+  mutate(metric = fct_recode(metric, `Faith's PD`="Faith")) %>%
+  
+  ggplot(aes(x=study_group, y=alpha, color=sample_type)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_grid(metric~., scales = "free") +
+    scale_color_manual(values=ann_colors$sample_type) +
+    theme_clean() +
+    #guides(color="none") +
+    labs(
+      x="", color="",
+      y="Alpha diversity value"
+    )
+
+```
+
+Linear models were used to estimate the difference between study groups.
+
+
+For each sample type: props_log ~ study_group
+
+```{r}
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon", "Faith"), names_to="metric", values_to="alpha") %>%
+  mutate(metric = fct_relevel(metric, "Faith", after=Inf)) %>%
+  mutate(metric = fct_recode(metric, `Faith's PD`="Faith")) %>%
+  
+  group_by(metric, sample_type) %>%
+  
+  # for regular linear models
+  do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) ### You only need this when you are not using the tidy_lm_posthoc
+
+
+summaries_df %>%
+  kable_style()
+
+```
+
+# Marker analysis
+
+```{r}
+markers_of_interest <- c("DunedinPACE_Colon", "PCHorvath1Resid_Colon", "PCHorvath2Resid_Colon", "PCHannumResid_Colon", "PCPhenoAgeResid_Colon", "PCDNAmTLResid_Colon", "PCGrimAgeResid_Colon", "DunedinPACE_Ileum", "PCHorvath1Resid_Ileum", "PCHorvath2Resid_Ileum", "PCHannumResid_Ileum", "PCPhenoAgeResid_Ileum", "PCDNAmTLResid_Ileum", "PCGrimAgeResid_Ileum", "DunedinPACE_blood", "PCHorvath1Resid_blood", "PCHorvath2Resid_blood", "PCHannumResid_blood", "PCPhenoAgeResid_blood", "PCDNAmTLResid_blood", "PCGrimAgeResid_blood", "Median Telomere Length (bp)", "20th Percentile Length (bp)", "Telomeres <3 Kbp (%)", "ShortCel (cumulative) final", "ZO-1 ILEUM", "ZO-1 COLON", "Occludin ILEUM", "Occludin COLON", "Zonulin (ng/ml)", "Reg3A (pg/ml)", "IFAB (pg/ml)", "LBP (pg/ml)", "b glucan (pg/ml)", "sCD163 (pg/ml)", "CXCL9", "Eotaxin", "IL-4", "IP-10", "MIP-1alpha", "MPO (pg/ml)", "Est  HIV DNA copies/ million  cells (Ileum)", "Est  HIV DNA copies/million  cells (Colon)", "Est  HIV DNA copies per million  cells", "Est  HIV rNA copies per million  cells", "HIV transcriptional activity PBMC", "2,6-Di-tert-butyl-1,4-benzoquinone", "5-Hydroxyindole-3-acetic acid", "7-Methylguanine", "Docosahexaenoic acid", "Glycerol", "L(-)-Carnitine", "L-Ascorbic acid 2-sulfate", "L-Asparagine", "L-Ergothioneine", "Levulinic acid", "L-Glutamic acid", "L-Histidine", "L-Kynurenine", "Mevalonic acid", "Oleic acid", "Pseudouridine", "Quinolinic acid", "K/T (ratio)", "Q/T (ratio)", "2-HYDROXYBUTYRATE", "CYTOSINE", "DEOXYCHOLATE", "GLYCERALDEHYDE", "MANNOSE", "MELIBIOSE", "THYMIDINE", "TREHALOSE", "UROCANATE", "w/o MS2:HIPPURATE", "w/o MS2:URSODEOXYCHOLATE", "w/o MS2:XANTHURENATE")
+
+#all(markers_of_interest %in% markers_long$Marker)
+#markers_of_interest[!markers_of_interest %in% markers_long$Marker]
+
+```
+
+
+Look at the distribution of the markers
+
+```{r}
+markers_long %>%
+  filter(grepl("Metabolites", Platform)) %>%
+  filter(!is.na(Value)) %>%
+  ggplot(aes(x=Marker, y=Value)) +
+    geom_boxplot() +
+    scale_y_log10() +
+    facet_grid(.~Platform, space="free", scales="free") +
+    theme_clean() +
+    theme(
+      #axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+      axis.text.x = element_blank(), axis.ticks.x = element_blank()
+    ) +
+    labs(
+      x="Samples",
+      y=""
+    )
+```
+
+```{r fig.height=6}
+markers_long %>%
+  filter(!grepl("Metabolites", Platform)) %>%
+  filter(!grepl("epi clocks", Platform)) %>%
+  #filter(!Platform %in% c("Microbial Translocation", "Telomere average")) %>%
+  filter(!is.na(Value)) %>%
+  ggplot(aes(x=Marker, y=Value)) +
+    geom_boxplot() +
+    scale_y_log10() +
+    facet_wrap(~Platform, scales="free", ncol=3) +
+    theme_clean() +
+    theme(
+      #axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+      axis.text.x = element_blank(), axis.ticks.x = element_blank()
+    ) +
+    labs(
+      x="Samples",
+      y=""
+    )
+```
+
+
+
+```{r}
+markers_long %>%
+  #filter(!grepl("Metabolites", Platform)) %>%
+  filter(grepl("epi clocks", Platform)) %>%
+  filter(!is.na(Value)) %>%
+  ggplot(aes(x=Marker, y=Value)) +
+    geom_boxplot() +
+    #scale_y_log10() +
+    facet_wrap(~Platform, scales="free", ncol=3) +
+    theme_clean() +
+    theme(
+      #axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+      axis.text.x = element_blank(), axis.ticks.x = element_blank()
+    ) +
+    labs(
+      x="Samples",
+      y=""
+    )
+```
+
+
+## Association with bacterial levels
+
+
+Spearman correlation is used for all the tests. The Benjamini-Hochberg fdr correction is calculated for each platform separately. Only the bacteria with >1% relative abundance across all the samples are tested. 
+
+```{r}
+## Subset the metadata file to only keep the samples you would like to test on
+s_toTest <- s %>%
+  filter(Keep) %>%
+  filter(!isControl) %>%
+  mutate(sample_type = factor(sample_type, levels=c("Ileum Tissue", "Colon Tissue", "Feces"))) %>%
+  droplevels()
+```
+
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(select(s_toTest, SampleID, sample_type, subject_id, study_group), by="SampleID")  %>%
+  group_by(Taxa, sample_type) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  mutate(max_mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  
+  filter(max_mean_prop > 0.01) %>%
+  filter(Taxa != "Bacteria") %>%
+  filter(Taxa != "p__Spirochaetes g__Brachyspira") %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+### Metabolites
+
+
+
+```{r}
+markers_long_toTest <- markers_long %>%
+  filter(grepl("Metabolites", Platform)) %>%
+  mutate(value_log = log10(Value)) %>%
+  left_join(props_toTest, by="subject_id")
+```
+
+
+The following tests are done for all the samples, regardless of their HIV status. 
+
+```{r}
+summaries_df <- markers_long_toTest %>%
+  group_by(sample_type, Marker, Platform, Taxa) %>%
+  #do(tidy_lmer(nlme::lme(props_log ~ value_log, random=~1|SubjectID, data=., na.action=na.omit))) %>% ## do this if there are repeated measures
+  do(tidy(cor.test(~ value_log + props_log, data=., method = "spearman"))) %>%
+  ungroup() %>%
+  #filter(!grepl("Intercept", term)) %>%
+  group_by(Platform, sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+```
+
+
+
+
+
+
+```{r}
+summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(-one_of("method", "alternative")) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(1), width = "5em") %>%
+  column_spec(c(2:4), width = "10em")
+```
+
+
+Showing only the metabolites with at least one significant correlation (fdr<0.1).
+
+```{r fig.height=10, fig.width=10}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  #filter(Platform == "Metabolites (Plasma)") %>%
+  group_by(Marker) %>%
+  mutate(any_comp = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>%
+  mutate(any_taxa = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  
+  filter(any_comp>0 & any_taxa>0) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+```{r fig.width=10, fig.height=15}
+toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(sample_type, Marker, Platform, Taxa)
+
+markers_long_toTest %>%
+  filter(!is.na(Value)) %>%
+  right_join(toPlot, by=c("sample_type", "Marker", "Platform", "Taxa")) %>%
+  mutate(Marker = paste(Marker, Platform, sep='\n')) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = sub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = paste(sample_type, Taxa, sep='\n')) %>%
+  ggplot(aes(x=props, y=Value)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    scale_x_log10(labels=scales:::percent) +
+    scale_y_log10() +
+    facet_wrap(~Marker + Taxa, ncol=5) +
+    theme_clean() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+    ) +
+    labs(
+      x="Bacterial relative abundance",
+      y="Metabolite level"
+    )
+```
+
+
+
+The following fdr corrections are only done for the markers of interest
+
+```{r}
+summaries_df_of_interest <- summaries_df %>%
+  filter(Marker %in% markers_of_interest) %>%
+  droplevels() %>%
+  group_by(Platform, sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() 
+
+
+summaries_df_of_interest %>%
+  write.table("abdel_mohsen_bacteria_vs_markers_metabolites_correlation.txt", sep='\t', quote=F, row.names = F)
+```
+
+
+```{r fig.height=14, fig.width=10}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df_of_interest %>%
+  
+  #group_by(Marker) %>%
+  #mutate(any_comp = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #group_by(Taxa) %>%
+  #mutate(any_taxa = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #filter(any_comp>0 & any_taxa>0) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+The following tests are done for HIV- and HIV+ separately. 
+
+```{r}
+summaries_df <- markers_long_toTest %>%
+  group_by(sample_type, Marker, Platform, Taxa, study_group) %>%
+  #do(tidy_lmer(nlme::lme(props_log ~ value_log, random=~1|SubjectID, data=., na.action=na.omit))) %>% ## do this if there are repeated measures
+  do(tidy(cor.test(~ value_log + props_log, data=., method = "spearman"))) %>%
+  ungroup() %>%
+  #filter(!grepl("Intercept", term)) %>%
+  group_by(Platform, sample_type, study_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+```
+
+
+```{r}
+summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(-one_of("method", "alternative")) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(1), width = "5em") %>%
+  column_spec(c(2:4), width = "10em")
+```
+
+
+Showing only the metabolites with at least one significant correlation (fdr<0.1).
+
+```{r fig.height=8, fig.width=8}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  #filter(Platform == "Metabolites (Plasma)") %>%
+  group_by(Marker) %>%
+  mutate(any_comp = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>%
+  mutate(any_taxa = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  
+  filter(any_comp>0 & any_taxa>0) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform + study_group, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+```{r fig.width=10, fig.height=4}
+toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(sample_type, Marker, Platform, Taxa)
+
+markers_long_toTest %>%
+  filter(!is.na(Value)) %>%
+  right_join(toPlot, by=c("sample_type", "Marker", "Platform", "Taxa")) %>%
+  mutate(Marker = paste(Marker, Platform, sep='\n')) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = sub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = paste(sample_type, Taxa, sep='\n')) %>%
+  ggplot(aes(x=props, y=Value, color=study_group)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    scale_x_log10(labels=scales:::percent) +
+    scale_y_log10() +
+    scale_color_manual(values=ann_colors$study_group) +
+    facet_wrap(~Marker + Taxa, ncol=5) +
+    theme_clean() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+    ) +
+    labs(
+      x="Bacterial relative abundance",
+      y="Metabolite level"
+    )
+```
+
+```{r fig.height=8, fig.width=8}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  #filter(Platform == "Metabolites (Plasma)") %>%
+  group_by(Marker) %>%
+  mutate(any_comp = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>%
+  mutate(any_taxa = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  
+  filter(any_comp>0 & any_taxa>0) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform + study_group, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+The following fdr corrections are only done for the markers of interest
+
+```{r}
+summaries_df_of_interest <- summaries_df %>%
+  filter(Marker %in% markers_of_interest) %>%
+  droplevels() %>%
+  group_by(Platform, sample_type, study_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() 
+
+
+summaries_df_of_interest %>%
+  write.table("abdel_mohsen_bacteria_vs_markers_metabolites_HIVstatus_correlation.txt", sep='\t', quote=F, row.names = F)
+```
+
+
+
+```{r fig.height=15, fig.width=12}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df_of_interest %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform + study_group, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+### Epigenetic clocks
+
+```{r}
+markers_long_toTest <- markers_long %>%
+  filter(grepl("epi clocks", Platform)) %>%
+  left_join(props_toTest, by="subject_id")
+```
+
+The following tests are done for all the samples regardless of their HIV status.
+
+```{r}
+summaries_df <- markers_long_toTest %>%
+  group_by(sample_type, Marker, Platform, Taxa) %>%
+  #do(tidy_lmer(nlme::lme(props_log ~ value_log, random=~1|SubjectID, data=., na.action=na.omit))) %>% ## do this if there are repeated measures
+  do(tidy(cor.test(~ Value + props_log, data=., method = "spearman"))) %>%
+  ungroup() %>%
+  #filter(!grepl("Intercept", term)) %>%
+  group_by(Platform, sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+```
+
+
+```{r fig.height=15, fig.width=15}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  #group_by(Marker) %>%
+  #mutate(any_comp = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #group_by(Taxa) %>%
+  #mutate(any_taxa = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #filter(any_comp>1 & any_taxa>1) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+
+The following fdr corrections are only done for the markers of interest
+
+```{r}
+summaries_df_of_interest <- summaries_df %>%
+  filter(Marker %in% markers_of_interest) %>%
+  droplevels() %>%
+  group_by(Platform, sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() 
+
+
+summaries_df_of_interest %>%
+  write.table("abdel_mohsen_bacteria_vs_markers_epiClocks_correlation.txt", sep='\t', quote=F, row.names = F)
+```
+
+
+```{r fig.height=15, fig.width=15}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df_of_interest %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+
+
+The following tests are done for HIV- and HIV+ separately. 
+
+```{r}
+summaries_df <- markers_long_toTest %>%
+  group_by(sample_type, Marker, Platform, Taxa, study_group) %>%
+  #do(tidy_lmer(nlme::lme(props_log ~ value_log, random=~1|SubjectID, data=., na.action=na.omit))) %>% ## do this if there are repeated measures
+  do(tidy(cor.test(~ Value + props_log, data=., method = "spearman"))) %>%
+  ungroup() %>%
+  #filter(!grepl("Intercept", term)) %>%
+  group_by(Platform, sample_type, study_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+```
+
+
+```{r}
+summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(-one_of("method", "alternative")) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(1), width = "5em") %>%
+  column_spec(c(2:4), width = "10em")
+```
+
+
+Showing only the metabolites with at least one significant correlation (fdr<0.1).
+
+```{r fig.height=17, fig.width=17}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  #group_by(Marker) %>%
+  #mutate(any_comp = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #group_by(Taxa) %>%
+  #mutate(any_taxa = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #filter(any_comp>0 & any_taxa>0) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform + study_group, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+```{r fig.width=10, fig.height=4}
+toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(sample_type, Marker, Platform, Taxa)
+
+markers_long_toTest %>%
+  filter(!is.na(Value)) %>%
+  right_join(toPlot, by=c("sample_type", "Marker", "Platform", "Taxa")) %>%
+  mutate(Marker = paste(Marker, Platform, sep='\n')) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = sub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = paste(sample_type, Taxa, sep='\n')) %>%
+  ggplot(aes(x=props, y=Value, color=study_group)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    scale_x_log10(labels=scales:::percent) +
+    #scale_y_log10() +
+    scale_color_manual(values=ann_colors$study_group) +
+    facet_wrap(~Marker + Taxa, ncol=5, scales="free") +
+    theme_clean() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+    ) +
+    labs(
+      x="Bacterial relative abundance",
+      y="Marker level"
+    )
+```
+
+
+The following fdr corrections are only done for the markers of interest
+
+```{r}
+summaries_df_of_interest <- summaries_df %>%
+  filter(Marker %in% markers_of_interest) %>%
+  droplevels() %>%
+  group_by(Platform, sample_type, study_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() 
+
+
+summaries_df_of_interest %>%
+  write.table("abdel_mohsen_bacteria_vs_markers_epiClocks_HIVstatus_correlation.txt", sep='\t', quote=F, row.names = F)
+```
+
+
+
+```{r fig.height=17, fig.width=17}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df_of_interest %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform + study_group, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+### All the other markers
+
+
+```{r}
+markers_long_toTest <- markers_long %>%
+  filter(!grepl("Metabolites", Platform)) %>%
+  filter(!grepl("epi clocks", Platform)) %>%
+  mutate(value_log = log10(Value)) %>%
+  left_join(props_toTest, by="subject_id")
+```
+
+
+The tests below are done for all the samples combined regardless of their HIV status.
+
+```{r}
+summaries_df <- markers_long_toTest %>%
+  group_by(sample_type, Marker, Platform, Taxa) %>%
+  #do(tidy_lmer(nlme::lme(props_log ~ value_log, random=~1|SubjectID, data=., na.action=na.omit))) %>% ## do this if there are repeated measures
+  do(tidy(cor.test(~ Value + props_log, data=., method = "spearman"))) %>%
+  ungroup() %>%
+  #filter(!grepl("Intercept", term)) %>%
+  group_by(Platform, sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+```
+
+
+```{r}
+summaries_df %>%
+  filter(fdr < 0.1) %>%
+  kable_style(fdr, 0.05) 
+```
+
+
+```{r fig.height=15, fig.width=15}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  #group_by(Marker) %>%
+  #mutate(any_comp = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #group_by(Taxa) %>%
+  #mutate(any_taxa = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #filter(any_comp>1 & any_taxa>1) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+
+```{r fig.width=10, fig.height=12}
+toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(sample_type, Marker, Platform, Taxa)
+
+markers_long_toTest %>%
+  filter(!is.na(Value)) %>%
+  right_join(toPlot, by=c("sample_type", "Marker", "Platform", "Taxa")) %>%
+  mutate(Marker = paste(Marker, Platform, sep='\n')) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = sub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = paste(sample_type, Taxa, sep='\n')) %>%
+  ggplot(aes(x=props, y=Value)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    scale_x_log10(labels=scales:::percent) +
+    scale_y_log10() +
+    facet_wrap(~Marker + Taxa) +
+    theme_clean() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+    ) +
+    labs(
+      x="Bacterial relative abundance",
+      y="Metabolite level"
+    )
+```
+
+
+
+The following fdr corrections are only done for the markers of interest
+
+```{r}
+summaries_df_of_interest <- summaries_df %>%
+  filter(Marker %in% markers_of_interest) %>%
+  droplevels() %>%
+  group_by(Platform, sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() 
+
+
+summaries_df_of_interest %>%
+  write.table("abdel_mohsen_bacteria_vs_markers_otherMarkers_correlation.txt", sep='\t', quote=F, row.names = F)
+```
+
+
+```{r fig.height=15, fig.width=10}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df_of_interest %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+The following tests are done for HIV- and HIV+ separately. 
+
+```{r}
+summaries_df <- markers_long_toTest %>%
+  filter(!is.na(Value)) %>%
+  group_by(sample_type, Marker, Platform, Taxa, study_group) %>%
+  #do(tidy_lmer(nlme::lme(props_log ~ value_log, random=~1|SubjectID, data=., na.action=na.omit))) %>% ## do this if there are repeated measures
+  do(tidy(cor.test(~ value_log + props_log, data=., method = "spearman"))) %>%
+  ungroup() %>%
+  #filter(!grepl("Intercept", term)) %>%
+  group_by(Platform, sample_type, study_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+```
+
+
+```{r}
+summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(-one_of("method", "alternative")) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(1), width = "5em") %>%
+  column_spec(c(2:4), width = "10em")
+```
+
+
+Showing only the metabolites with at least one significant correlation (fdr<0.1).
+
+```{r fig.height=17, fig.width=22}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  
+  #group_by(Marker) %>%
+  #mutate(any_comp = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #group_by(Taxa) %>%
+  #mutate(any_taxa = sum(fdr<0.1)) %>%
+  #ungroup() %>%
+  
+  #filter(any_comp>0 & any_taxa>0) %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform + study_group, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
+
+
+```{r fig.width=10, fig.height=4}
+toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  select(sample_type, Marker, Platform, Taxa)
+
+markers_long_toTest %>%
+  filter(!is.na(Value)) %>%
+  right_join(toPlot, by=c("sample_type", "Marker", "Platform", "Taxa")) %>%
+  mutate(Marker = paste(Marker, Platform, sep='\n')) %>%
+  mutate(Taxa = gsub("[pcofgs]__", "", Taxa)) %>%
+  mutate(Taxa = sub(" ", "\n", Taxa)) %>%
+  mutate(Taxa = paste(sample_type, Taxa, sep='\n')) %>%
+  ggplot(aes(x=props, y=Value, color=study_group)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    scale_x_log10(labels=scales:::percent) +
+    scale_y_log10() +
+    scale_color_manual(values=ann_colors$study_group) +
+    facet_wrap(~Marker + Taxa, ncol=5) +
+    theme_clean() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+    ) +
+    labs(
+      x="Bacterial relative abundance",
+      y="Metabolite level"
+    )
+```
+
+
+The following fdr corrections are only done for the markers of interest
+
+```{r}
+summaries_df_of_interest <- summaries_df %>%
+  filter(Marker %in% markers_of_interest) %>%
+  droplevels() %>%
+  group_by(Platform, sample_type, study_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() 
+
+
+summaries_df_of_interest %>%
+  write.table("abdel_mohsen_bacteria_vs_markers_otherMarkers_HIVstatus_correlation.txt", sep='\t', quote=F, row.names = F)
+```
+
+
+```{r fig.height=17, fig.width=22}
+## This plot needs a lot of tweaking to make it look good. 
+## If it's giving you too much trouble include the next block instead.
+summaries_df %>%
+  
+  mutate(p_label = p_stars(fdr)) %>%
+  mutate(label_color = ifelse(abs(estimate) > 0.5, "A", "B")) %>%
+  
+  mutate(fory = paste(Taxa, sample_type)) %>%
+  
+  ggplot(aes(x=Marker, y=fory, fill=estimate)) +
+    geom_tile(fill = "white", color="black") +
+    geom_point(shape = 21, aes(size = abs(estimate)), color="white") +
+    geom_text(aes(label=p_label, color=label_color), size=3.5, vjust=0.76) +
+    facet_grid(.~Platform + study_group, space="free", scales="free") +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0)) +
+    scale_fill_gradient2(low = brewer.pal(11, 'RdBu')[11], high = brewer.pal(11, 'RdBu')[1], mid=brewer.pal(11, 'RdBu')[6], midpoint=0) +
+    scale_color_manual(values=c("#D3D3D3", "#000000")) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      strip.text.y = element_text(angle = 0),
+      strip.text.x = element_text(angle = 90),
+      strip.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA) 
+    ) +
+    guides(size="none", color="none") +
+    labs(
+      x="", fill="Correlation\ncoefficient",
+      y=""
+    )
+```
